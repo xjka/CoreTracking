@@ -133,17 +133,38 @@ class CalcArgs
     }
 };
 
+class fof_arg
+{
+    public:
+        ParticleSet *tracers;
+        std::map<int,std::list<std::pair<int,std::array<double,7>>>> *match_dict;
+        int i_min;
+        int i_max;
+        double timestep;
+
+        void init(ParticleSet *tracers, std::map<int,std::list<std::pair<int,std::array<double,7>>>> *match_dict, double timestep, int i_min, int i_max)
+        {
+            fof_arg::tracers = tracers;
+            fof_arg::match_dict = match_dict;
+            fof_arg::timestep = timestep;
+            fof_arg::i_min = i_min; 
+            fof_arg::i_max = i_max; 
+        }
+};
+std::vector<fof_arg> fof_args(3);
+
 std::mutex tr_mutex;
 std::mutex p_mutex;
-std::array<std::atomic<bool>,5> kill = {false,false,false,false,false};
-std::array<std::condition_variable,5> cv;
+std::mutex fof_mutex;
+std::array<std::atomic<bool>,8> kill = {false,false,false,false,false,false,false,false};
+std::array<std::condition_variable,8> cvar;
 CalcArgs glob_args, glob_tr_args, glob_tr_args2;
-std::array<std::mutex,5> mutexes;
-bool ready[5] = {false,false,false,false,false};
-bool processed[5] = {false, false, false, false, false};
+std::array<std::mutex,8> mutexes;
+bool ready[8] = {false,false,false,false,false,false,false,false};
+bool processed[8] = {false, false, false, false, false,false,false,false};
 
 
-//double get_timestep(double* vel);
+double get_timestep(double v_mean, double r_tst, double v_rms, double a_max);
 void create_particle_distribution(ParticleSet &particles, ParticleSet &tracers, double mu);
 void kick_pos(ParticleSet &particles, ParticleSet &tracers, double &timestep);
 void kick_vel(ParticleSet &particles, ParticleSet &tracers, double &timestep, double mu, double epsilon, int block_size,
@@ -151,12 +172,13 @@ void kick_vel(ParticleSet &particles, ParticleSet &tracers, double &timestep, do
 void write_output(std::string filename, ParticleSet &particles, ParticleSet &tracers);
 void kick_tracers(ParticleSet &particles, ParticleSet &tracers, double &timestep, double mu, double epsilon, double block_size);
 double init_timestep(ParticleSet &particles, double epsilon);
-ParticleSet aggregate_tracers(ParticleSet &tracers, double link_length, double timestep);
+ParticleSet aggregate_tracers(ParticleSet &tracers, double link_length, double timestep, std::thread &fof_thr1, std::thread &fof_thr2, std::thread &fof_thr3);
 void mat_section(int mutex_idx);
 void lower_tri();
 void block_diag();
 void top_corner();
 void signal(std::thread &thr, int idx);
+void fof(int thrd_idx, fof_arg *args_addr);
 
 namespace po = boost::program_options;
 
@@ -168,12 +190,13 @@ double r_hi = 1000;
 double kTG = 1;
 double dl_min = r_hi/1000;
 double box_size; 
-
+double end_time;
+double link_length;
 
 int main(int argc, char** argv)
 {
     ParticleSet particles, tracers;
-    double current_time = 0, end_time, timestep, mu, epsilon, next_write_time, link_length;
+    double current_time = 0, timestep, mu, epsilon, next_write_time;
     int block_size, N_particles, numfiles, write_cntr=1;
     std::string filebase, outdir;
     std::ostringstream outfile;
@@ -184,22 +207,22 @@ int main(int argc, char** argv)
         ("help,h", "Print this help message")
         ("outdir",       po::value<std::string>(&outdir)->default_value("output/"), "output directory")
         ("outfile,o",    po::value<std::string>(&filebase)->default_value("test_grav"), "outputfilename")
-        ("duration,T",   po::value<double>(&end_time)->default_value(1e2), "duration of simulation [0.98Myr]")
-        ("timestep,t",   po::value<double>(&timestep)->default_value(1e-1), "timestep")
-        ("mu,u",         po::value<double>(&mu)->default_value(1e-1), "gravitational parameter for particles [pc(km/s)^2  (G=4.3e-3 [pc(km/s)^2/M0])")
+        ("duration,T",   po::value<double>(&end_time)->default_value(1e1), "duration of simulation [0.98Myr]")
+        //("timestep,t",   po::value<double>(&timestep)->default_value(1e-1), "timestep")
+        ("mu,u",         po::value<double>(&mu)->default_value(1), "gravitational parameter for particles [pc(km/s)^2  (G=4.3e-3 [pc(km/s)^2/M0])")
         ("epsilon,e",    po::value<double>(&epsilon)->default_value(1e-2), "gravitational softening parameter")
-        ("block_size,b", po::value<int>(&block_size)->default_value(1000), "blocking size for performance (number of elements to group)")
+        ("block_size,b", po::value<int>(&block_size)->default_value(300), "blocking size for performance (number of elements to group)")
         ("numfiles,f",   po::value<int>(&numfiles)->default_value(600), "number of files to write out")
-        ("linklen,l",    po::value<double>(&link_length)->default_value(1e-1), "linking length for tracer aggregation")
+        ("linklen,l",    po::value<double>(&link_length)->default_value(1e1), "linking length for tracer aggregation")
         ("verbose,v",    "whether to print verbose output")
         ("ttol",         po::value<double>(&ttol)->default_value(0.01), "tolerance for timestep")
         ("deg",          po::value<double>(&k_deg)->default_value(0.2), "order of power for density construction")
-        ("r_lo",         po::value<double>(&r_lo)->default_value(0), "lowest radius for density generation [pc]")
-        ("r_hi",         po::value<double>(&r_hi)->default_value(1000), "biggest radius for density generation [pc]")
-        ("kTG",          po::value<double>(&kTG)->default_value(4),  "sigma of velocity for distribution generation, also interpreble as temp, k = 6.94e-60 [(km/s)^2*M0/K]")
-        ("dl_min",       po::value<double>(&dl_min)->default_value(r_hi/1000), "min update distance for particle with average speed")
-        ("bx",           po::value<double>(&box_size)->default_value(1e64), "bounding box for periodic boundary conditions")
-        ("nparticles,n", po::value<int>(&N_particles)->default_value(1e3), "number of particles for the simulation"); 
+        //("r_lo",         po::value<double>(&r_lo)->default_value(1e-1), "lowest radius for density generation [pc]")
+        //("r_hi",         po::value<double>(&r_hi)->default_value(1e6), "biggest radius for density generation [pc]")
+        ("kTG",          po::value<double>(&kTG)->default_value(100),  "sigma of velocity for distribution generation, also interpreble as temp, k = 6.94e-60 [(km/s)^2*M0/K]")
+        ("dl_min",       po::value<double>(&dl_min)->default_value(1e3/5000), "min update distance for particle with average speed")
+        ("bx",           po::value<double>(&box_size)->default_value(1e3), "bounding box for periodic boundary conditions")
+        ("nparticles,n", po::value<int>(&N_particles)->default_value(4000), "number of particles for the simulation"); 
 
     po::variables_map vm;
     try
@@ -229,7 +252,7 @@ int main(int argc, char** argv)
     particles = ParticleSet(N_particles, mu);
     tracers = ParticleSet(N_particles, mu);
     create_particle_distribution(particles, tracers, mu);
-    //timestep = init_timestep(particles, epsilon);
+    timestep = init_timestep(particles, epsilon);
     next_write_time = end_time/(numfiles-1);
     outfile<<outdir<<filebase<<"_"<<write_cntr<<".hdf5";
     write_output(outfile.str(), particles, tracers);
@@ -243,7 +266,9 @@ int main(int argc, char** argv)
     std::thread calc3(lower_tri); 
     std::thread calc4(mat_section, 3);
     std::thread calc5(mat_section, 4);
-    
+    std::thread fof_thr1(fof, 5, &fof_args[0]);
+    std::thread fof_thr2(fof, 6, &fof_args[1]);
+    std::thread fof_thr3(fof, 7, &fof_args[2]);
 
     //start writing thread
     //std::thread(&write_thread, write_output_thread, write_buff);
@@ -251,7 +276,7 @@ int main(int argc, char** argv)
     {
         kick_pos(particles, tracers, timestep);
         //kick_vel(particles, tracers, timestep, mu, epsilon, block_size, calc1, calc2, calc3, calc4, calc5);
-        tracers = aggregate_tracers(tracers, link_length, timestep);
+        tracers = aggregate_tracers(tracers, link_length, timestep, fof_thr1, fof_thr2, fof_thr3);
         current_time += timestep;  
         if(current_time>=next_write_time)
         {
@@ -274,19 +299,22 @@ int main(int argc, char** argv)
     for(auto &k : kill)
         k=true;
 
-    
     signal(calc1, 0);
     signal(calc2, 1);
     signal(calc3, 2);
     signal(calc4, 3);
     signal(calc5, 4);
-
+    signal(fof_thr1, 5);
+    signal(fof_thr2, 6);
+    signal(fof_thr3, 7);
     calc1.join();
     calc2.join();
     calc3.join();
     calc4.join();
     calc5.join();
-    
+    fof_thr1.join();
+    fof_thr2.join();
+    fof_thr3.join();
 
     std::cout<<"done."<<std::endl;
     return 0;
@@ -296,17 +324,26 @@ int main(int argc, char** argv)
 double init_timestep(ParticleSet &particles, double epsilon)
 {
     int N_particles = particles.size;
-    double x,y,z, dx, dy, dz, mu, A, v_rms=0, v_mean =0, a_max=-1e64, r_tst=1e46;
+    double x,y,z, dx, dy, dz, mu, A, v_rms=0, v_mean=0, a_max=-1e64, r_tst=1e46;
     Eigen::ArrayXd ax=Eigen::ArrayXd::Zero(N_particles), ay=Eigen::ArrayXd::Zero(N_particles), az=Eigen::ArrayXd::Zero(N_particles);
 
     for(int i=0 ;i<N_particles; i++)
     {
-        v_rms += std::pow(particles.vel(i,0),2) + std::pow(particles.vel(i,1),2) +std::pow(particles.vel(i,2),2);
+
+        v_rms += std::pow(particles.vel(i,0),2) + std::pow(particles.vel(i,1),2) +std::pow(particles.vel(i,2), 2);
+        v_mean += std::sqrt( std::pow(particles.vel(i,0),2) + std::pow(particles.vel(i,1),2) +std::pow(particles.vel(i,2), 2) );
     }
     
     v_rms = v_rms/N_particles;
-    return 0.5/v_rms;
+    v_mean = v_mean/N_particles;
+    r_tst = 2 * box_size / std::pow(N_particles,0.333);
+    
+    return end_time/(600*4);  
+}
 
+double get_timestep(double v_mean, double r_tst, double v_rms, double a_max)
+{
+    return std::max(dl_min/v_mean, std::min(r_tst*ttol/2/v_mean, v_rms/a_max));
 }
 
 void kick_pos(ParticleSet &particles, ParticleSet &tracers, double &timestep)
@@ -332,13 +369,13 @@ void signal(std::thread &thr, int idx)
     //signal threads to start calc
     std::lock_guard lk(mutexes[idx]);
     ready[idx] = true;
-    cv[idx].notify_one();
+    cvar[idx].notify_one();
 }
 void wait(std::thread & thr, int idx)
 {
     //wait for worker
     std::unique_lock lk(mutexes[idx]);
-    cv[idx].wait(lk, [idx]{return processed[idx];});
+    cvar[idx].wait(lk, [idx]{return processed[idx];});
     processed[idx] = false;
     lk.unlock();
 }
@@ -350,38 +387,6 @@ void kick_vel(ParticleSet &particles, ParticleSet &tracers, double &timestep, do
     double A, dx, dy, dz, dvx, dvy, dvz, x ,y ,z, v_rms=0, v_mean=0, a_max=-1e46, r_tst=1e64;
     Array ax=Array::Zero(N_particles), ay=Array::Zero(N_particles), az=Array::Zero(N_particles);
     Array tr_ax=Array::Zero(N_tracers), tr_ay=Array::Zero(N_tracers), tr_az=Array::Zero(N_tracers); 
-    
-    /*
-    v_rms += std::pow(particles.vel(0,0),2) + std::pow(particles.vel(0,1),2) + std::pow(particles.vel(0,2),2);
-    v_mean += std::sqrt(std::pow(particles.vel(0,0),2) + std::pow(particles.vel(0,1),2) + std::pow(particles.vel(0,2),2));
-    for(int i=1;i<N_particles;i++)
-    {
-        x = particles.pos(i,0);
-        y = particles.pos(i,1);
-        z = particles.pos(i,2);
-
-        v_rms += std::pow(particles.vel(i,0),2) + std::pow(particles.vel(i,1),2) + std::pow(particles.vel(i,2),2);
-        v_mean += std::sqrt(std::pow(particles.vel(i,0),2) + std::pow(particles.vel(i,1),2) + std::pow(particles.vel(i,2),2));
-        for(int j=0; j<i; j++)
-        {
-            dx = x - particles.pos(j,0);
-            dy = y - particles.pos(j,1);
-            dz = z - particles.pos(j,2);
-
-            r_tst = std::min(std::sqrt(std::pow(dx,2) + std::pow(dy,2) +std::pow(dz,2)), r_tst);
-
-            A = mu / (std::pow(std::pow(dx,2) + std::pow(dy,2) + std::pow(dz,2), 1.5) + epsilon); 
-            ax(j) += A*dx;
-            ay(j) += A*dy;
-            az(j) += A*dz;
-
-            ax(i) -= A*dx; 
-            ay(i) -= A*dy;
-            az(i) -= A*dz;    
-        }
-    }
-    */
-
     
     glob_args.init(   block_size, mu, epsilon, r_tst, v_rms, v_mean, NULL,                      NULL,                      ax,    ay,    az,    &particles, NULL);
     glob_tr_args.init(NULL,       mu, epsilon, NULL,  NULL,  NULL,   0,                         std::floor(N_particles/2), tr_ax, tr_ay, tr_az, &particles, &tracers);
@@ -402,9 +407,9 @@ void kick_vel(ParticleSet &particles, ParticleSet &tracers, double &timestep, do
     v_mean = glob_args.v_mean/N_particles;
     r_tst = glob_args.r_tst;
     a_max = (ax.square()+ay.square()+az.square()).sqrt().maxCoeff();
-    timestep = std::max(dl_min/v_mean, std::min(r_tst*ttol/2/v_mean, v_rms/a_max));
+    timestep = get_timestep(v_mean, r_tst, v_mean, a_max); 
     
-    if(verbose and false){
+    if(verbose){
         std::cout<<"timestep: "<<timestep<<std::endl; 
         std::cout<<"v_mean: "<<v_mean<<", v_rms: "<<v_rms<<std::endl;
         std::cout<<"ax: "<<ax.abs().maxCoeff()<<", ay: "<<ay.abs().maxCoeff()<<", az: "<<az.abs().maxCoeff()<<std::endl;
@@ -418,27 +423,6 @@ void kick_vel(ParticleSet &particles, ParticleSet &tracers, double &timestep, do
         particles.vel(i,2) += az(i)*timestep;
     }
     
-    /*
-    for(int i=0; i<N_particles; i++)
-    {
-        x = particles.pos(i,0);
-        y = particles.pos(i,1);
-        z = particles.pos(i,2);
-        for(int j=0; j<N_tracers; j++)
-        {
-            dx = x - tracers.pos(j,0);
-            dy = y - tracers.pos(j,1);
-            dz = z - tracers.pos(j,2);
-
-            A = mu / (std::pow(std::pow(dx,2) + std::pow(dy,2) + std::pow(dz,2), 1.5) + epsilon); 
-           
-            tr_ax(j) += A*dx;
-            tr_ay(j) += A*dy;
-            tr_az(j) += A*dz;
-        }
-    }
-    */
-
     wait(calc4, 3);
     wait(calc5, 4);
 
@@ -589,16 +573,6 @@ void write_output(std::string filename, ParticleSet &particles, ParticleSet &tra
     return;
 }
 
-
-
-double b(double &mu1, double &mu2, Eigen::Array3d & vrel, Eigen::Array3d &v1, Eigen::Array3d &v2)
-{
-    double b = (std::sqrt(mu1) + std::sqrt(mu2))/std::sqrt(vrel.square().sum()); // * std::pow((v1.square().sum() +v2.square().sum())/2 / vrel.square().sum(), 0.25);
-    if (verbose)
-        std::cout<<"b: "<<b<<std::endl;
-    return b;
-}
-
 //append ms onto m_list if ms.first is not equal to calling_idx or already in m_list
 void unique_insert(int calling_idx, std::list<std::pair<int,std::array<double,7>>> &m_list, std::pair<int,std::array<double,7>> &ms)
 {
@@ -615,43 +589,42 @@ void unique_insert(int calling_idx, std::list<std::pair<int,std::array<double,7>
     }
 }
 
-ParticleSet aggregate_tracers(ParticleSet &tracers, double link_length, double timestep)
+
+ParticleSet aggregate_tracers(ParticleSet &tracers, double link_length, double timestep, std::thread &fof_thr1, std::thread &fof_thr2, std::thread &fof_thr3)
 {
-    Eigen::Array3d x1, x2, v1, v2, delta_x ,delta_v;
-    int N_tracers = tracers.size, p_idx;
-    std::map<int,std::list<std::pair<int,std::array<double,7>>>> match_dict;
+    Eigen::Array3d x1, x2, v1, v2, delta_x, delta_v;
+    int N_tracers = tracers.size, p_idx; 
     double dotxv, dmin;
     Tensor_3D<double> pos,vel;
     std::vector<double> mu;
-    
+    std::map<int,std::list<std::pair<int,std::array<double,7>>>> match_dict;
+   
+    //initialize match_dict
     for (int i=0; i<N_tracers; i++)
     {
         match_dict[i] = std::list<std::pair<int,std::array<double,7>>>();
     }
 
-    //create list of maps which identify each particle with a particle index
-    for(int i=1; i<N_tracers; i++)
-    {
-        x1 = {tracers.pos(i,0), tracers.pos(i,1), tracers.pos(i,2)};
-        v1 = {tracers.vel(i,0), tracers.vel(i,1), tracers.vel(i,2)};
-        for(int j=0; j<i; j++)
-        {
-            // do velocity based collision comparison
-            x2 = {tracers.pos(j,0), tracers.pos(j,1), tracers.pos(j,2)};
-            v2 = {tracers.vel(j,0), tracers.vel(j,1), tracers.vel(j,2)};
-            delta_x = x1-x2;
-            delta_v = v1-v2;
-            dotxv = delta_x.cwiseProduct(delta_v).sum();
-            dmin = std::sqrt(delta_x.square().sum() + 2*dotxv*std::abs(dotxv)/delta_v.square().sum() + 
-                    std::pow(dotxv,2)/delta_v.square().sum());
-            if(dotxv<0 and dmin<b(tracers.mu.at(i), tracers.mu.at(j), delta_v, v1, v2))
-            {
-                match_dict[i].push_back(std::make_pair(j, std::array<double,7>({x2(0),x2(1),x2(2),v2(0),v2(1),v2(2),tracers.mu.at(j)}) ));
-                match_dict[j].push_back(std::make_pair(i, std::array<double,7>({x1(0),x1(1),x1(2),v1(0),v1(1),v1(2),tracers.mu.at(i)}) ));
-            }
-        }
-    }
-    
+    //split the tracer indices into groups for each thread
+    int split[4];
+    int r = N_tracers % 3;
+    split[0] = 0;
+    for(int i=1;i<=3;i++)
+        split[i] = split[i-1] + int(N_tracers/3) + int(i<=r); 
+    split[0] = 1;
+ 
+    fof_args.at(0).init(&tracers, &match_dict, timestep, split[0], split[1]);
+    fof_args.at(1).init(&tracers, &match_dict, timestep, split[1], split[2]);
+    fof_args.at(2).init(&tracers, &match_dict, timestep, split[2], split[3]);
+
+    signal(fof_thr1, 5);
+    signal(fof_thr2, 6);
+    signal(fof_thr3, 7);
+  
+    wait(fof_thr1, 5);
+    wait(fof_thr2, 6);
+    wait(fof_thr3, 7);
+
     //now reduce the data structure of groups to the individual groups
     for( auto &[calling_idx, m_list] :  match_dict)
     {
@@ -681,7 +654,7 @@ ParticleSet aggregate_tracers(ParticleSet &tracers, double link_length, double t
     pos = Tensor_3D<double>(1,match_dict.size(),3);
     vel = Tensor_3D<double>(1,match_dict.size(),3);
     int cnt = 0;
-    for(auto &[p_idx,group_list] : match_dict)
+    for(auto &[p_idx, group_list] : match_dict)
     {
         x=0;
         y=0;
@@ -722,6 +695,82 @@ ParticleSet aggregate_tracers(ParticleSet &tracers, double link_length, double t
     return ParticleSet(mu, pos, vel);
 }
 
+double impact_parameter(double &mu1, double &mu2, Eigen::Array3d & vrel, Eigen::Array3d &v1, Eigen::Array3d &v2)
+{
+    return 3.14159*(std::sqrt(mu1) + std::sqrt(mu2))/std::sqrt(vrel.square().sum()); // * std::pow((v1.square().sum() +v2.square().sum())/2 / vrel.square().sum(), 0.25);
+}
+
+void fof(int thrd_idx, fof_arg *args_addr)
+{
+    Eigen::Array3d x1, x2, v1, v2, delta_x ,delta_v;
+    int N_tracers, p_idx; 
+    double dotxv, dmin, t_crit;
+    Tensor_3D<double> pos, vel;
+    std::map<int,std::list<std::pair<int,std::array<double,7>>>> temp_match_dict;
+    
+    
+    while(true)
+    {
+        //acquire lock and wait for data
+        std::unique_lock lk(mutexes[thrd_idx]);
+        cvar[thrd_idx].wait(lk, [thrd_idx]{return ready[thrd_idx];});
+        ready[thrd_idx] = false;
+
+        if(kill[thrd_idx])
+            return;
+
+        fof_arg args = *args_addr;
+        N_tracers = args.tracers->size;
+        temp_match_dict.clear(); 
+        for (int i=0; i<N_tracers; i++)
+        {
+            temp_match_dict[i] = std::list<std::pair<int,std::array<double,7>>>();
+        }
+
+        //create list of maps which identify each particle with a particle index
+        for(int i=args.i_min; i<args.i_max; i++)
+        {
+            x1 = {args.tracers->pos(i,0), args.tracers->pos(i,1), args.tracers->pos(i,2)};
+            v1 = {args.tracers->vel(i,0), args.tracers->vel(i,1), args.tracers->vel(i,2)};
+            for(int j=0; j<i; j++)
+            {
+                // do velocity based collision comparison
+                x2 = {args.tracers->pos(j,0), args.tracers->pos(j,1), args.tracers->pos(j,2)};
+                v2 = {args.tracers->vel(j,0), args.tracers->vel(j,1), args.tracers->vel(j,2)};
+                delta_x = x1-x2;
+                delta_v = v1-v2;
+                dotxv = delta_x.cwiseProduct(delta_v).sum();
+                t_crit = std::min(std::abs(dotxv)/delta_v.square().sum(), args.timestep);
+                dmin = std::sqrt(delta_x.square().sum() + 2*dotxv*t_crit + delta_v.square().sum()*std::pow(t_crit,2));
+                if(dotxv<0 and dmin<link_length and dmin<impact_parameter(args.tracers->mu.at(i), args.tracers->mu.at(j), delta_v, v1, v2))
+                {
+                    temp_match_dict[i].push_back(std::make_pair(j, std::array<double,7>({x2(0),x2(1),x2(2),v2(0),v2(1),v2(2), args.tracers->mu.at(j)}) ));
+                    temp_match_dict[j].push_back(std::make_pair(i, std::array<double,7>({x1(0),x1(1),x1(2),v1(0),v1(1),v1(2), args.tracers->mu.at(i)}) ));
+                }
+            }
+        }
+            
+        //obtain mutex and add entries from this thread to global match_dict
+        fof_mutex.lock();
+        for (auto &[p_idx, mtch_list] : temp_match_dict)
+        { 
+            for (auto & mtch : mtch_list)
+            {
+                //for now don't check this already exists b/c each thread looks at mutually excluive pairs, and match_dict
+                //is renewed every time; so this pair can't already exist. 
+                (*args.match_dict)[p_idx].push_back(mtch);
+            }
+        }
+        fof_mutex.unlock(); 
+         
+        //signal that are done and return
+        processed[thrd_idx] = true;
+        lk.unlock();
+        cvar[thrd_idx].notify_one(); 
+    }
+}
+
+
 void top_corner()
 {
     CalcArgs* args = &glob_args;
@@ -734,7 +783,7 @@ void top_corner()
     {
         //acquire lock and wait for data
         std::unique_lock lk(mutexes[0]);
-        cv[0].wait(lk, []{return ready[0];});
+        cvar[0].wait(lk, []{return ready[0];});
         ready[0] = false;
 
         if(kill[0])
@@ -763,6 +812,7 @@ void top_corner()
             v2 = std::pow(particles->vel(i,0),2) + std::pow(particles->vel(i,1),2) + std::pow(particles->vel(i,2),2);
             v_rms += v2;
             v_mean  += std::sqrt(v2);
+
             for(int j=0; j<i; j++)
             {
                 dx = x - particles->pos(j,0);
@@ -797,7 +847,7 @@ void top_corner()
         //signal that are done and return
         processed[0] = true;
         lk.unlock();
-        cv[0].notify_one();
+        cvar[0].notify_one();
     }
 }
 
@@ -815,7 +865,7 @@ void block_diag()
     {
         //acquire lock and wait for data
         std::unique_lock lk(mutexes[1]);
-        cv[1].wait(lk, []{return ready[1];});
+        cvar[1].wait(lk, []{return ready[1];});
         ready[1] = false;
 
         if(kill[1])
@@ -875,7 +925,7 @@ void block_diag()
         //signal that are done and return
         processed[1] = true;
         lk.unlock();
-        cv[1].notify_one();
+        cvar[1].notify_one();
     }
 }
 
@@ -892,7 +942,7 @@ void lower_tri()
     {
         //acquire lock and wait for data
         std::unique_lock lk(mutexes[2]);
-        cv[2].wait(lk, []{return ready[2];});
+        cvar[2].wait(lk, []{return ready[2];});
         ready[2]  = false;
 
         if(kill[2])
@@ -946,7 +996,7 @@ void lower_tri()
         //signal that are done and return
         processed[2] = true;
         lk.unlock();
-        cv[2].notify_one();
+        cvar[2].notify_one();
     }
 }
 
@@ -966,7 +1016,7 @@ void mat_section(int mutex_idx)
     {
         //acquire lock and wait for data
         std::unique_lock lk(mutexes[mutex_idx]);
-        cv[mutex_idx].wait(lk, [mutex_idx]{return ready[mutex_idx];});
+        cvar[mutex_idx].wait(lk, [mutex_idx]{return ready[mutex_idx];});
         ready[mutex_idx] = false;
         
         if(kill[mutex_idx])
@@ -1017,6 +1067,6 @@ void mat_section(int mutex_idx)
         //signal that are done and return
         processed[mutex_idx] = true;
         lk.unlock();
-        cv[mutex_idx].notify_one();
+        cvar[mutex_idx].notify_one();
     }
 }

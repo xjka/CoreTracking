@@ -103,7 +103,7 @@ if __name__=="__main__":
     fig_E, ax_E = plt.subplots(2,1,figsize=(10,10))
     ax_E[0].plot(E / E.max(),'.-')
     ax_E[0].grid()
-    ax_E[0].set(title='E(t)')
+    ax_E[0].set(title='KE(t)')
     ax_E[1].plot(Sig,'.-')
     #ax_E[1].plot(sigs, '.-')
     ax_E[1].grid()
