@@ -5,6 +5,11 @@ from matplotlib import animation
 from mpl_toolkits.mplot3d import axes3d
 import argparse
 from scipy.optimize import minimize 
+from matplotlib import cm
+from cycler import cycler
+
+def get_cycler(n):
+    return cycler(color=cm.get_cmap('viridis')(np.linspace(0,0.9,n)))
 
 def init(im):
     im.set_data( np.array([]),np.array([]) )
@@ -28,19 +33,38 @@ def animate(fig,idx,im1,im2,pos,trpos,trmu):
     fig.suptitle('snapshot:{:d}, #collisions:{:d}'.format(idx,len(pos[idx,0,:])-len(trpos[idx][0])))
     #return (im1,im2) 
 
-def prepare_animation(bar_container, vel, imm, axh):
+def prepare_animation(bar_containers, vels, imms, axh, Mu):
 
-    def animate(frame_number, vel, imm, axh):
-        # simulate new data coming in
-        n, _ = np.histogram(vel[frame_number], bins=30, density=True)
-        for count, rect in zip(n, bar_container.patches):
-            rect.set_height(count)
-        sigma2 = (vel[frame_number]**2).sum()/(3*len(v[frame_number]))
-        vl = np.linspace(0,np.max(vel[frame_number]),100)
-        imm.set_data(vl , 4*np.pi*vl**2/np.power(np.pi*2*sigma2, 3.0/2) * np.exp(-vl**2/2/sigma2))
-        axh.set(title=r'$N(kT/m_p|v) = \frac{{4\pi v^2}}{{(\pi 2 k T/m_p)^{{3/2}} }} e^{{\frac{{-v^2}}{{2kT/m_p}} }},\;\; kT/m_p={:.3f}$'.format(sigma2))
-        return bar_container.patches
-    return lambda frame_number : animate(frame_number, vel, imm, axh)
+    def animate(frame_number, vels, imms, axh, Mu):
+        legnd = []
+        max_count = -1e34
+        min_max_count = 1e34
+        for idx,vel in enumerate(vels[frame_number]):
+            if len(vel)>100:
+                n, _ = np.histogram(vel, bins=30, density=True)
+                for count, rect in zip(n, bar_containers[idx].patches):
+                    rect.set_height(count)
+                    max_count = np.max((count, max_count)) 
+                min_max_count = np.min((min_max_count, max_count))
+                sigma2 = (vel**2).sum()/(3*len(vel))
+                vl = np.linspace(0, np.max(vel)*1.3, 200)
+                imms[idx].set_data(vl , 4*np.pi*vl**2/np.power(np.pi*2*sigma2, 3.0/2) * np.exp(-vl**2/2/sigma2))
+                axh.set(title=r'$N(\sigma|v) = \frac{{4\pi v^2}}{{(\pi 2 \sigma)^{{3/2}} }} e^{{\frac{{-v^2}}{{2\sigma}} }}$')
+                legnd.append(r'$\sigma_{{m_p={:.0f}}}={:.3f}$'.format(Mu[frame_number][idx],sigma2))
+            else:
+                for rect in bar_containers[idx].patches:
+                    rect.set_height(0)
+                imms[idx].set_data([0,0],[0,0])
+        axh.legend(legnd)
+        axh.set_ylim(top=min_max_count*2.3)
+        if idx<len(bar_containers)-1:
+            for i in range(idx, len(bar_containers)):
+                for rect in bar_containers[i].patches:
+                    rect.set_height(0)
+                imms[i].set_data([0,0],[0,0])
+        #return bar_container.patches
+        return [container.patches for container in bar_containers]
+    return lambda frame_number : animate(frame_number, vels, imms, axh, Mu)
 
 
 if __name__=="__main__":
@@ -62,7 +86,7 @@ if __name__=="__main__":
     trpos = []
     trvel = []
     trmu = []
-    
+    n_collisions = [] 
     for i in range(1,args.numframes+1):
         h5file = h5py.File(args.indir+"test_grav_"+str(i)+".hdf5")
         pos.append(h5file["particles/pos"][:,:])
@@ -70,10 +94,13 @@ if __name__=="__main__":
         trpos.append(h5file["tracers/pos"][:,:])
         trvel.append(h5file["tracers/vel"][:,:])
         trmu.append(h5file["tracers/mu"][:])
+        n_collisions.append(len(pos[-1][0])-len(trpos[-1][0]))
+        
 
-    
     pos = np.array(pos)
     vel = np.array(vel)
+    n_collisions = np.array(n_collisions)
+    Gamma = np.polyfit(np.arange(len(n_collisions)-1), n_collisions[1:], 1)[0]
 
     im1 = []# ax.scatter(pos[0,0,:], pos[0,1,:], pos[0,2,:], marker='*')#,s=8)
     im2 = ax.scatter(trpos[0][0], trpos[0][1], trpos[0][2], marker='8', color='r', alpha=0.3)#, s=8*np.ones_like(trpos[0][0]))
@@ -88,39 +115,79 @@ if __name__=="__main__":
     sigs = []
     Sig = []
     v = []
-    for i,tv in enumerate(trvel):
-        tv = np.array(tv)
+    Mu = []
+    for i,tv in enumerate(trvel): #tv is 3 x N_particles
         v2 = (tv**2).sum(axis=0)
-        E.append((0.5*trmu[i]*v2).sum() )
+        E.append((0.5*trmu[i]*v2).sum())
         sigs.append(tv.var(axis=1))
         Sig.append(v2.sum()/(3*len(v2)))
-        v.append(np.sqrt(v2))
-    
+        v_ = []
+        Mu_ = []
+        for mu in np.unique(trmu[i]):
+            mask = trmu[i] == mu
+            tv_ = np.array(tv[:,mask])
+            v2_ = (tv_**2).sum(axis=0)
+            v_.append(np.sqrt(v2_))
+            Mu_.append(mu)
+        v.append(v_)
+        Mu.append(Mu_)
     E = np.array(E)
-    sigs=np.array(sigs) 
+    sigs=np.array(sigs)
 
+
+    max_mu = len(Mu[-1])
+    bin_edges = np.append(np.arange(1,max_mu+1)-0.5, max_mu+0.5)
+    min_mu_val = Mu[0][0] 
+    print(bin_edges)
+    trmu_hist = []
+    for tm in trmu:
+        trmu_hist.append(np.histogram(tm/min_mu_val, bins=bin_edges)[0])
+    trmu_hist = np.array(trmu_hist)
+    
     #dEdt = np.diff(E)/np.diff(np.ones(len(E)))
-    fig_E, ax_E = plt.subplots(2,1,figsize=(10,10))
-    ax_E[0].plot(E / E.max(),'.-')
-    ax_E[0].grid()
-    ax_E[0].set(title='KE(t)')
-    ax_E[1].plot(Sig,'.-')
+    fig_E, ax_E = plt.subplots(2,2,figsize=(10,10))
+    ax_E[0,0].plot(E/E.max(),'.-')
+    ax_E[0,0].grid()
+    ax_E[0,0].set(title='KE(t), $t_{{cool}}$={:.2e}'.format(np.abs(np.polyfit(np.arange(len(E)-1),E[1:],1)[0])/np.mean(E)))
+    ax_E[0,1].plot(Sig,'.-')
     #ax_E[1].plot(sigs, '.-')
-    ax_E[1].grid()
-    ax_E[1].set(title = r'$\sigma(t)$')
-    ax_E[1].legend((r'$\sigma^2$', r'$\sigma_x^2$',r'$\sigma_y^2$',r'$\sigma_z^2$'))
+    ax_E[0,1].grid()
+    ax_E[0,1].set(title = r'$\sigma(t)$')
+    #ax_E[0,1].legend((r'$\sigma^2$', r'$\sigma_x^2$',r'$\sigma_y^2$',r'$\sigma_z^2$'))
+    
+    ax_E[1,0].plot(n_collisions,'.-')
+    ax_E[1,0].grid()
+    ax_E[1,0].set(title='# coliisions vs t, $\Gamma={:.4f}$'.format(Gamma))
+    ax_E[1,1].set_prop_cycle(get_cycler(trmu_hist.shape[0]))
+    ax_E[1,1].plot(np.tile(np.expand_dims(np.arange(1,trmu_hist.shape[1]+1),axis=1),(1,trmu_hist.shape[0])), trmu_hist.T)
+    ax_E[1,1].grid()
+    ax_E[1,1].set(title=r'Mass distribution over time', xscale='log', ylim=[10.0, ax_E[1,1].get_ylim()[1]])
+
     ani = animation.FuncAnimation(fig, lambda idx : animate(fig,idx,im1,im2,pos,trpos,trmu), blit=False, interval=25, frames=args.numframes, repeat_delay=300)
     
-    #figh, axh = plt.subplots(1,figsize=(10,10))
-    _,_,box_container = axh.hist(v[0], density=True, bins=30)
-    #res = minimize(lambda s2,ve : (ve**2).sum()/2/s2 + len(ve)*3/2*np.log(np.pi*2*s2), x0=4, args=(v[0]) )
-    sigma2 = (v[0]**2).sum()/(3*len(v[0]))
-    vl = np.linspace(0,np.max(v[0]),100)
-    imm, = axh.plot(vl, 4*np.pi*vl**2/np.power(np.pi*2*sigma2, 3.0/2) * np.exp(-vl**2/2/sigma2), 'b-')
-    axh.set_ylim(top=axh.get_ylim()[1]*1.3)
-    axh.grid()
-    ani2 = animation.FuncAnimation(fig, prepare_animation(box_container, v, imm, axh), blit=False, interval=25, frames=args.numframes, repeat_delay=300) 
+    bx_list = []
+    im_list = []
+    cmap = cm.get_cmap('viridis')
+    clr_list = cmap(np.linspace(0,0.9,len(v[-1])))
+    for i, v_ in enumerate(v[-1]): #get the full number of histogram plots you could need 
+        _,_,box_container = axh.hist(v_, density=True, bins=30, color=clr_list[i], alpha=0.65)
+        bx_list.append(box_container)
+        #res = minimize(lambda s2,ve : (ve**2).sum()/2/s2 + len(ve)*3/2*np.log(np.pi*2*s2), x0=4, args=(v[0]) )
+        sigma2 = (v_**2).sum()/(3*len(v_))
+        vl = np.linspace(0,np.max(v_),100)
+        imm, = axh.plot(vl, 4*np.pi*vl**2/np.power(np.pi*2*sigma2, 3.0/2) * np.exp(-vl**2/2/sigma2), c=clr_list[i])
+        im_list.append(imm)
 
+    #axh.hist(v0, density=True, bins=30)
+    #res = minimize(lambda s2,ve : (ve**2).sum()/2/s2 + len(ve)*3/2*np.log(np.pi*2*s2), x0=4, args=(v[0]) )
+    #sigma2 = (v[0]**2).sum()/(3*len(v[0]))
+    #vl = np.linspace(0,np.max(v[0]),100)
+    #imm, = axh.plot(vl, 4*np.pi*vl**2/np.power(np.pi*2*sigma2, 3.0/2) * np.exp(-vl**2/2/sigma2), 'b-')
+    
+    axh.set_ylim(top=2)#axh.get_ylim()[1]*1.3)
+    axh.grid()
+    
+    ani2 = animation.FuncAnimation(fig, prepare_animation(bx_list, v, im_list, axh, Mu), blit=False, interval=25, frames=args.numframes, repeat_delay=300) 
 
     if len(args.outfile)>0:
         writermp4 = animation.FFMpegWriter(bitrate=600, fps=10)

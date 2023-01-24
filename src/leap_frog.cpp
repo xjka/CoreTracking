@@ -1,3 +1,4 @@
+#define _USE_MATH_DEFINES
 #include <cmath>
 #include <iostream>
 #include <H5Cpp.h>
@@ -189,15 +190,14 @@ double r_lo = 0;
 double r_hi = 1000;
 double kTG = 1;
 double dl_min = r_hi/1000;
-double box_size; 
-double end_time;
-double link_length;
+double box_size, end_time, link_length, b=1, tf=4;
+int numfiles;
 
 int main(int argc, char** argv)
 {
     ParticleSet particles, tracers;
     double current_time = 0, timestep, mu, epsilon, next_write_time;
-    int block_size, N_particles, numfiles, write_cntr=1;
+    int block_size, N_particles, write_cntr=1;
     std::string filebase, outdir;
     std::ostringstream outfile;
     
@@ -207,13 +207,13 @@ int main(int argc, char** argv)
         ("help,h", "Print this help message")
         ("outdir",       po::value<std::string>(&outdir)->default_value("output/"), "output directory")
         ("outfile,o",    po::value<std::string>(&filebase)->default_value("test_grav"), "outputfilename")
-        ("duration,T",   po::value<double>(&end_time)->default_value(1e1), "duration of simulation [0.98Myr]")
-        //("timestep,t",   po::value<double>(&timestep)->default_value(1e-1), "timestep")
-        ("mu,u",         po::value<double>(&mu)->default_value(1), "gravitational parameter for particles [pc(km/s)^2  (G=4.3e-3 [pc(km/s)^2/M0])")
+        ("duration,T",   po::value<double>(&end_time)->default_value(50), "duration of simulation [0.98Myr]")
+        ("tf,",          po::value<double>(&tf)->default_value(4), "timestep feactor for temporary maxwell distribution test")
+        ("mu,u",         po::value<double>(&mu)->default_value(10), "gravitational parameter for particles [pc(km/s)^2  (G=4.3e-3 [pc(km/s)^2/M0])")
         ("epsilon,e",    po::value<double>(&epsilon)->default_value(1e-2), "gravitational softening parameter")
-        ("block_size,b", po::value<int>(&block_size)->default_value(300), "blocking size for performance (number of elements to group)")
+        ("b,b",          po::value<double>(&b)->default_value(1), "constant infront of impact parameter test")
         ("numfiles,f",   po::value<int>(&numfiles)->default_value(600), "number of files to write out")
-        ("linklen,l",    po::value<double>(&link_length)->default_value(1e1), "linking length for tracer aggregation")
+        ("linklen,l",    po::value<double>(&link_length)->default_value(50), "linking length for tracer aggregation")
         ("verbose,v",    "whether to print verbose output")
         ("ttol",         po::value<double>(&ttol)->default_value(0.01), "tolerance for timestep")
         ("deg",          po::value<double>(&k_deg)->default_value(0.2), "order of power for density construction")
@@ -222,7 +222,7 @@ int main(int argc, char** argv)
         ("kTG",          po::value<double>(&kTG)->default_value(100),  "sigma of velocity for distribution generation, also interpreble as temp, k = 6.94e-60 [(km/s)^2*M0/K]")
         ("dl_min",       po::value<double>(&dl_min)->default_value(1e3/5000), "min update distance for particle with average speed")
         ("bx",           po::value<double>(&box_size)->default_value(1e3), "bounding box for periodic boundary conditions")
-        ("nparticles,n", po::value<int>(&N_particles)->default_value(4000), "number of particles for the simulation"); 
+        ("nparticles,n", po::value<int>(&N_particles)->default_value(8000), "number of particles for the simulation"); 
 
     po::variables_map vm;
     try
@@ -249,6 +249,7 @@ int main(int argc, char** argv)
     }
 
     ////////////////run main code///////////////////
+    block_size = int(N_particles/2.0);
     particles = ParticleSet(N_particles, mu);
     tracers = ParticleSet(N_particles, mu);
     create_particle_distribution(particles, tracers, mu);
@@ -338,7 +339,7 @@ double init_timestep(ParticleSet &particles, double epsilon)
     v_mean = v_mean/N_particles;
     r_tst = 2 * box_size / std::pow(N_particles,0.333);
     
-    return end_time/(600*4);  
+    return end_time/(numfiles*tf);  
 }
 
 double get_timestep(double v_mean, double r_tst, double v_rms, double a_max)
@@ -697,7 +698,7 @@ ParticleSet aggregate_tracers(ParticleSet &tracers, double link_length, double t
 
 double impact_parameter(double &mu1, double &mu2, Eigen::Array3d & vrel, Eigen::Array3d &v1, Eigen::Array3d &v2)
 {
-    return 3.14159*(std::sqrt(mu1) + std::sqrt(mu2))/std::sqrt(vrel.square().sum()); // * std::pow((v1.square().sum() +v2.square().sum())/2 / vrel.square().sum(), 0.25);
+    return b *  std::sqrt( std::pow(mu1+mu2,3) / (mu1*mu2 * vrel.square().sum() * M_PI*M_SQRT2) ); 
 }
 
 void fof(int thrd_idx, fof_arg *args_addr)
