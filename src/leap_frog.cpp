@@ -1,159 +1,6 @@
-#define _USE_MATH_DEFINES
-#include <cmath>
-#include <iostream>
-#include <H5Cpp.h>
-#include <boost/program_options.hpp> 
-#include <random>
-#include <vector>
-#include <sstream>
-#include <eigen3/Eigen/Dense>
-#include <list>
-#include <utility>
-#include <mutex>
-#include <thread>
-#include <condition_variable>
+#include "utilities.hpp"
 
-
-template <class class_t> class Tensor_3D //as of now row major order
-{
-    public:
-        std::vector<class_t> idata;
-        std::array<size_t,3> strides;
-        std::array<size_t,3> dimensions;
-        
-        Tensor_3D(void) : idata(NULL), dimensions{0,0,0}, strides{0,0,0} {}
-            
-        Tensor_3D(size_t dim1, size_t dim2, size_t dim3) : dimensions{dim1, dim2, dim3}
-        {
-            strides = std::array<size_t,3>{dim2*dim3, dim3, 1};
-            idata = std::vector<class_t>(dim1*dim2*dim3);
-        }
-        
-        class_t &operator()(int idx2, int idx3)
-        {
-            return idata.at(0*strides[0] + idx2*strides[1] + idx3*strides[2]);
-        }
-
-        class_t &operator()(int idx1, int idx2, int idx3)
-        {
-            return idata.at(idx1*strides[0] + idx2*strides[1] + idx3*strides[2]);
-        }
-        
-        void append(std::vector<class_t> element)
-        {
-            //technically should check that len(element)=dimensions[2]
-            dimensions[2] = element.size();
-            for (int i=0; i<element.size(); i++)
-            {
-                idata.push_back(element[i]);
-            }
-            dimensions[1] += 1;
-            //strides[0] += dimensions[2];
-        }
-
-        double* data()
-        {
-            return idata.data();
-        }
-};
-
-class ParticleSet {
-    
-    public:
-        std::vector<double> mu;
-        long size;
-        Tensor_3D <double> pos;
-        Tensor_3D <double> vel;
-        
-        ParticleSet(void) : size(0) {}
-
-        ParticleSet(long size, double mu) : size(size)
-        {
-            ParticleSet::mu = std::vector<double>(size, mu);
-            ParticleSet::pos = Tensor_3D<double>(1,size,3);
-            ParticleSet::vel = Tensor_3D<double>(1,size,3);
-            ParticleSet::size = size;
-        }
-
-        ParticleSet(std::vector<double> mu, Tensor_3D<double> pos, Tensor_3D<double> vel)
-        {
-            ParticleSet::mu = mu;
-            ParticleSet::pos = pos;
-            ParticleSet::vel = vel;
-            ParticleSet::size = pos.dimensions[1];
-        }
-};
-
-typedef Eigen::Map<Eigen::ArrayXd> ArrayRef;
-typedef Eigen::ArrayXd Array;
-class CalcArgs
-{
-    public:
-        int block_size;
-        double mu;
-        double epsilon;
-        double r_tst;
-        double v_rms;
-        double v_mean;
-        int start;
-        int stop;
-        ArrayRef ax;
-        ArrayRef ay;
-        ArrayRef az;
-        ParticleSet *particles;
-        ParticleSet *tracers;
-    
-    CalcArgs(void) : ax(NULL,0), ay(NULL,0), az(NULL,0) {}
-
-    CalcArgs(int b, double u, double epsilon, double r_tst, double v_rms, double v_mean, int start, int stop, Eigen::Ref<Array> ax, Eigen::Ref<Array> ay, 
-            Eigen::Ref<Array> az, ParticleSet *particles, ParticleSet *tracers) : block_size(b), mu(u), epsilon(epsilon), r_tst(r_tst), v_rms(v_rms), v_mean(v_mean)
-                                                               , ax(ax.data(),ax.size()), ay(ay.data(),ay.size()), az(az.data(),az.size())
-    {
-        CalcArgs::start = start;
-        CalcArgs::stop = stop;
-        CalcArgs::particles = particles;
-        CalcArgs::tracers = tracers;
-    }
-    
-    void init(int b, double u, double epsilon, double r_tst, double v_rms, double v_mean, int start, int stop, Eigen::Ref<Array> iax, Eigen::Ref<Array> iay, 
-            Eigen::Ref<Array> iaz, ParticleSet *particles, ParticleSet *tracers)
-    {
-        CalcArgs::block_size = b;
-        CalcArgs::mu = u;
-        CalcArgs::epsilon = epsilon;
-        CalcArgs::r_tst = r_tst;
-        CalcArgs::v_rms = v_rms;
-        CalcArgs::v_mean = v_mean;
-        new (&ax) ArrayRef(iax.data(), iax.size());
-        new (&ay) ArrayRef(iay.data(), iay.size());
-        new (&az) ArrayRef(iaz.data(), iaz.size());
-        CalcArgs::start = start;
-        CalcArgs::stop = stop;
-        CalcArgs::particles = particles;
-        CalcArgs::tracers = tracers;    
-    }
-};
-
-class fof_arg
-{
-    public:
-        ParticleSet *tracers;
-        std::map<int,std::list<std::pair<int,std::array<double,7>>>> *match_dict;
-        int i_min;
-        int i_max;
-        double timestep;
-
-        void init(ParticleSet *tracers, std::map<int,std::list<std::pair<int,std::array<double,7>>>> *match_dict, double timestep, int i_min, int i_max)
-        {
-            fof_arg::tracers = tracers;
-            fof_arg::match_dict = match_dict;
-            fof_arg::timestep = timestep;
-            fof_arg::i_min = i_min; 
-            fof_arg::i_max = i_max; 
-        }
-};
 std::vector<fof_arg> fof_args(3);
-
 std::mutex tr_mutex;
 std::mutex p_mutex;
 std::mutex fof_mutex;
@@ -166,14 +13,13 @@ bool processed[8] = {false, false, false, false, false,false,false,false};
 
 
 double get_timestep(double v_mean, double r_tst, double v_rms, double a_max);
-void create_particle_distribution(ParticleSet &particles, ParticleSet &tracers, double mu);
+void create_particle_distribution(ParticleSet &particles, ParticleSet &tracers, double mu, std::string &input_file, double &current_time);
 void kick_pos(ParticleSet &particles, ParticleSet &tracers, double &timestep);
 void kick_vel(ParticleSet &particles, ParticleSet &tracers, double &timestep, double mu, double epsilon, int block_size,
         std::thread& calc1, std::thread& calc2, std::thread& calc3, std::thread& calc4, std::thread& calc5);
-void write_output(std::string filename, ParticleSet &particles, ParticleSet &tracers);
 void kick_tracers(ParticleSet &particles, ParticleSet &tracers, double &timestep, double mu, double epsilon, double block_size);
 double init_timestep(ParticleSet &particles, double epsilon);
-ParticleSet aggregate_tracers(ParticleSet &tracers, double link_length, double timestep, std::thread &fof_thr1, std::thread &fof_thr2, std::thread &fof_thr3);
+ParticleSet aggregate_tracers(ParticleSet &tracers, double link_length, double timestep, std::vector<std::thread> &fof_threads, Histogram &hist);
 void mat_section(int mutex_idx);
 void lower_tri();
 void block_diag();
@@ -191,16 +37,17 @@ double r_hi = 1000;
 double kTG = 1;
 double dl_min = r_hi/1000;
 double box_size, end_time, link_length, b=1, tf=4;
-int numfiles;
+int numfiles, num_agg_threads=3, num_calc_threads=5;
 
 int main(int argc, char** argv)
 {
     ParticleSet particles, tracers;
     double current_time = 0, timestep, mu, epsilon, next_write_time;
     int block_size, N_particles, write_cntr=1;
-    std::string filebase, outdir;
+    std::string filebase, outdir, input_file;
     std::ostringstream outfile;
-    
+    Histogram hist;
+
     //read in user input and set variables
     po::options_description desc("compute velocity field decomposition with given basis");
     desc.add_options()
@@ -208,6 +55,7 @@ int main(int argc, char** argv)
         ("outdir",       po::value<std::string>(&outdir)->default_value("output/"), "output directory")
         ("outfile,o",    po::value<std::string>(&filebase)->default_value("test_grav"), "outputfilename")
         ("duration,T",   po::value<double>(&end_time)->default_value(50), "duration of simulation [0.98Myr]")
+        ("infile,i",     po::value<std::string>(&input_file)->default_value(""), "file to intialize simulation from")
         ("tf,",          po::value<double>(&tf)->default_value(4), "timestep feactor for temporary maxwell distribution test")
         ("mu,u",         po::value<double>(&mu)->default_value(10), "gravitational parameter for particles [pc(km/s)^2  (G=4.3e-3 [pc(km/s)^2/M0])")
         ("epsilon,e",    po::value<double>(&epsilon)->default_value(1e-2), "gravitational softening parameter")
@@ -252,11 +100,11 @@ int main(int argc, char** argv)
     block_size = int(N_particles/2.0);
     particles = ParticleSet(N_particles, mu);
     tracers = ParticleSet(N_particles, mu);
-    create_particle_distribution(particles, tracers, mu);
+    create_particle_distribution(particles, tracers, mu, input_file, current_time);
     timestep = init_timestep(particles, epsilon);
     next_write_time = end_time/(numfiles-1);
     outfile<<outdir<<filebase<<"_"<<write_cntr<<".hdf5";
-    write_output(outfile.str(), particles, tracers);
+    write_output(outfile.str(), particles, tracers, current_time, hist);
     write_cntr++;
     outfile.str("");
     outfile.clear();
@@ -267,9 +115,9 @@ int main(int argc, char** argv)
     std::thread calc3(lower_tri); 
     std::thread calc4(mat_section, 3);
     std::thread calc5(mat_section, 4);
-    std::thread fof_thr1(fof, 5, &fof_args[0]);
-    std::thread fof_thr2(fof, 6, &fof_args[1]);
-    std::thread fof_thr3(fof, 7, &fof_args[2]);
+    std::vector<std::thread> fof_threads;
+    for(int i=0;i<num_agg_threads; i++)
+        fof_threads.push_back(std::thread (fof, num_calc_threads+i, &fof_args[i]));
 
     //start writing thread
     //std::thread(&write_thread, write_output_thread, write_buff);
@@ -277,12 +125,12 @@ int main(int argc, char** argv)
     {
         kick_pos(particles, tracers, timestep);
         //kick_vel(particles, tracers, timestep, mu, epsilon, block_size, calc1, calc2, calc3, calc4, calc5);
-        tracers = aggregate_tracers(tracers, link_length, timestep, fof_thr1, fof_thr2, fof_thr3);
+        tracers = aggregate_tracers(tracers, link_length, timestep, fof_threads, hist);
         current_time += timestep;  
         if(current_time>=next_write_time)
         {
             outfile<<outdir<<filebase<<"_"<<write_cntr<<".hdf5";
-            write_output(outfile.str(), particles, tracers);
+            write_output(outfile.str(), particles, tracers, current_time, hist);
             if(write_cntr%10==0)
                 std::cout<<"write counter: "<<write_cntr<<std::endl;
             //obtain output FIFO queue mutex, add entry and move on if not too big
@@ -305,17 +153,16 @@ int main(int argc, char** argv)
     signal(calc3, 2);
     signal(calc4, 3);
     signal(calc5, 4);
-    signal(fof_thr1, 5);
-    signal(fof_thr2, 6);
-    signal(fof_thr3, 7);
+    for(int i=0; i<num_agg_threads; i++)
+        signal(fof_threads.at(i), num_calc_threads+i);
+    
     calc1.join();
     calc2.join();
     calc3.join();
     calc4.join();
     calc5.join();
-    fof_thr1.join();
-    fof_thr2.join();
-    fof_thr3.join();
+    for(int i=0; i<num_agg_threads; i++)
+        fof_threads.at(i).join();
 
     std::cout<<"done."<<std::endl;
     return 0;
@@ -330,7 +177,6 @@ double init_timestep(ParticleSet &particles, double epsilon)
 
     for(int i=0 ;i<N_particles; i++)
     {
-
         v_rms += std::pow(particles.vel(i,0),2) + std::pow(particles.vel(i,1),2) +std::pow(particles.vel(i,2), 2);
         v_mean += std::sqrt( std::pow(particles.vel(i,0),2) + std::pow(particles.vel(i,1),2) +std::pow(particles.vel(i,2), 2) );
     }
@@ -435,7 +281,7 @@ void kick_vel(ParticleSet &particles, ParticleSet &tracers, double &timestep, do
     }
 }
 
-void create_particle_distribution(ParticleSet &particles, ParticleSet &tracers, double mu)
+void create_particle_distribution(ParticleSet &particles, ParticleSet &tracers, double mu, std::string &input_file, double &current_time)
 {
     int N_particles = particles.size, N_tracers = tracers.size, cnt = 0;
     double r, phi, theta, a,  pmin, pmax;
@@ -446,131 +292,37 @@ void create_particle_distribution(ParticleSet &particles, ParticleSet &tracers, 
     pmin = a*std::pow(r_lo, 1/k_deg);
     pmax = a*std::pow(r_hi, 1/k_deg);
     std::uniform_real_distribution<> uniform(-box_size/2.0, box_size/2.0); //(pmin, pmax);
-
-    for(int cnt=0; cnt<N_particles; cnt++) 
-    {
-        //r = std::pow(uniform(gen)/a, k_deg); 
-        //phi = uniform(gen)* 2*3.14159265 / (pmax-pmin);
-        //theta = std::acos(2*uniform(gen) / (pmax-pmin) - 1);
-         
-        particles.pos(cnt,0) = uniform(gen); //r*std::sin(theta)*std::cos(phi);
-        particles.pos(cnt,1) = uniform(gen); //r*std::sin(theta)*std::sin(phi);
-        particles.pos(cnt,2) = uniform(gen); //r*std::cos(theta);
-        
-        particles.vel(cnt,0) = N(gen); 
-        particles.vel(cnt,1) = N(gen); 
-        particles.vel(cnt,2) = N(gen); 
-
-        tracers.pos(cnt,0) = particles.pos(cnt,0);
-        tracers.pos(cnt,1) = particles.pos(cnt,1);
-        tracers.pos(cnt,2) = particles.pos(cnt,2);
-        tracers.vel(cnt,0) = particles.vel(cnt,0);
-        tracers.vel(cnt,1) = particles.vel(cnt,1);
-        tracers.vel(cnt,2) = particles.vel(cnt,2);
-    }
-    return;
-}
-
-std::string create_parent_group(H5::H5File &h5file, std::string group_name)
-{
-    char *grpname;
-    std::vector<std::string> grpnames;
-    std::string parentgrpname = "";
-
-    //first create necessary groups
-    grpname = std::strtok(group_name.data(), "/");
-    while(grpname){
-        grpnames.push_back(std::string(grpname));
-        grpname = strtok(NULL, "/");
-    }
-    parentgrpname += grpnames[0];
-    if(!h5file.nameExists(parentgrpname))
-        h5file.createGroup(parentgrpname);
     
-    for(int i=1; i<grpnames.size()-1; i++) //create group for all but last name
-    {  
-        parentgrpname += "/"+grpnames[i];
-        if(!h5file.nameExists(parentgrpname))
-            h5file.createGroup(parentgrpname);  
-    }
-    
-    return parentgrpname+"/"+grpnames.back();  
-}
-
-void write_slab(H5::DataSet &dataset, Tensor_3D<double> &p, std::vector<hsize_t> &offset, H5::DataSpace &mem_dspace, H5::DataSpace &file_dspace )
-{
-    int N_particles = (int)(p.dimensions[1]);
-    //select memory hyperslab
-    std::vector<hsize_t> count = {N_particles,1};
-    mem_dspace.selectHyperslab(H5S_SELECT_SET, count.data(), offset.data());
-    //select file hyperslab
-    std::vector<hsize_t> file_count = {1,N_particles};
-    std::vector<hsize_t> file_offset = {offset[1], offset[0]};
-    file_dspace.selectHyperslab(H5S_SELECT_SET, file_count.data(), file_offset.data());
-    //write data
-    dataset.write(p.data(), H5::PredType::NATIVE_DOUBLE, mem_dspace, file_dspace);
-
-}
-
-void write_output(std::string filename, ParticleSet &particles, ParticleSet &tracers)
-{
-    //create file
-    H5::H5File h5file(filename, H5F_ACC_TRUNC);
-    // get number of particles
-    int N_particles = particles.size, N_tracers = tracers.size;
-    hsize_t rank;
-    std::string datasetname;
-    std::vector<hsize_t> offset, filedims;
-
-    //create memory datspace 
-    std::vector<hsize_t> datadims = {N_particles,3};
-    rank = datadims.size(); //number of dimensions for this dataset
-    H5::DataSpace mem_dspace(rank, datadims.data()); //for memory chunk
-    datadims = {N_tracers, 3};
-    H5::DataSpace tr_mem_dspace(rank, datadims.data());
-
-    //create file data spaces
-    filedims = {3,N_particles};
-    rank = filedims.size();
-    H5::DataSpace file_dspace(rank, filedims.data()); //in file
-    filedims = {3, N_tracers};
-    rank = filedims.size();
-    H5::DataSpace tr_file_dspace(rank, filedims.data());
-
-    //DataSpace to make mu
-    filedims = {N_particles};
-    H5::DataSpace mu_dspace(1, filedims.data());
-    filedims = {N_tracers};
-    H5::DataSpace tr_mu_dspace(1, filedims.data());
-
-    //create datasets 
-    create_parent_group(h5file, "particles/pos");
-    H5::DataSet pos_dataset = h5file.createDataSet("particles/pos", H5::PredType::NATIVE_DOUBLE, file_dspace, H5P_DEFAULT);
-    H5::DataSet vel_dataset = h5file.createDataSet("particles/vel", H5::PredType::NATIVE_DOUBLE, file_dspace, H5P_DEFAULT);
-    H5::DataSet mu_dataset = h5file.createDataSet("particles/mu", H5::PredType::NATIVE_DOUBLE, mu_dspace, H5P_DEFAULT);
-
-    create_parent_group(h5file, "tracers/pos");
-    H5::DataSet tr_pos_dataset = h5file.createDataSet("tracers/pos", H5::PredType::NATIVE_DOUBLE, tr_file_dspace, H5P_DEFAULT);
-    H5::DataSet tr_vel_dataset = h5file.createDataSet("tracers/vel", H5::PredType::NATIVE_DOUBLE, tr_file_dspace, H5P_DEFAULT); 
-    H5::DataSet tr_mu_dataset = h5file.createDataSet("tracers/mu", H5::PredType::NATIVE_DOUBLE, tr_mu_dspace, H5P_DEFAULT);
-
-    //write mu's
-    mu_dataset.write(particles.mu.data(), H5::PredType::NATIVE_DOUBLE, mu_dspace);
-    tr_mu_dataset.write(tracers.mu.data(), H5::PredType::NATIVE_DOUBLE, tr_mu_dspace);
-
-    for(int xyz=0;xyz<3;xyz++) //xyz=0-->, xyz=1-->y, xyz=2 --> z
+    //if an input file is specified initialize from that
+    if(input_file != "")
     {
-        offset = {0,xyz}; //pos offset 
-        //particles
-        write_slab(pos_dataset, particles.pos, offset, mem_dspace, file_dspace);
-        write_slab(vel_dataset, particles.vel, offset, mem_dspace, file_dspace);
-
-        //tracers
-        write_slab(tr_pos_dataset, tracers.pos, offset, tr_mem_dspace, tr_file_dspace);
-        write_slab(tr_vel_dataset, tracers.vel, offset, tr_mem_dspace, tr_file_dspace);
+        std::cout<<"generating from input_file  (will ignore any conflicting cmd-line arguments)"<<std::endl;
+        file_init(input_file, particles, tracers, current_time); 
     }
+    else //else just do usual random generation of inital state
+    {
+        for(int cnt=0; cnt<N_particles; cnt++) 
+        {
+            //r = std::pow(uniform(gen)/a, k_deg); 
+            //phi = uniform(gen)* 2*3.14159265 / (pmax-pmin);
+            //theta = std::acos(2*uniform(gen) / (pmax-pmin) - 1);
+             
+            particles.pos(cnt,0) = uniform(gen); //r*std::sin(theta)*std::cos(phi);
+            particles.pos(cnt,1) = uniform(gen); //r*std::sin(theta)*std::sin(phi);
+            particles.pos(cnt,2) = uniform(gen); //r*std::cos(theta);
+            
+            particles.vel(cnt,0) = N(gen); 
+            particles.vel(cnt,1) = N(gen); 
+            particles.vel(cnt,2) = N(gen); 
 
-    h5file.close();
+            tracers.pos(cnt,0) = particles.pos(cnt,0);
+            tracers.pos(cnt,1) = particles.pos(cnt,1);
+            tracers.pos(cnt,2) = particles.pos(cnt,2);
+            tracers.vel(cnt,0) = particles.vel(cnt,0);
+            tracers.vel(cnt,1) = particles.vel(cnt,1);
+            tracers.vel(cnt,2) = particles.vel(cnt,2);
+        }
+    }
     return;
 }
 
@@ -590,8 +342,30 @@ void unique_insert(int calling_idx, std::list<std::pair<int,std::array<double,7>
     }
 }
 
+std::vector<int> thread_split(int numthreads, int N_elements)
+{
+    std::vector<int> split(numthreads+1), n_cmprs(numthreads);
+        int r, tot_comparisons = (int) ((std::pow(N_elements,2) + N_elements)/2.0);
+    r = tot_comparisons % numthreads;
 
-ParticleSet aggregate_tracers(ParticleSet &tracers, double link_length, double timestep, std::thread &fof_thr1, std::thread &fof_thr2, std::thread &fof_thr3)
+    //first get the size of each split
+    for(int i=0; i <numthreads; i++)
+        n_cmprs[i] = int(tot_comparisons/numthreads) + int(i<r); 
+    
+    //now find best match of indices so that split of pairwise 
+    //indices roughly follows this division of labor
+    split[0] = 0;
+    for(int i=1;i<numthreads;i++){
+        split[i] = (int) std::round((std::sqrt(1 + 4*(2*n_cmprs[i-1] + std::pow(split[i-1],2) - split[i-1])) + 1) / 2.0);
+        n_cmprs[i] += n_cmprs[i-1] - (std::pow(split[i],2)-split[i] - (std::pow(split[i-1],2) -split[i-1]) )/2.0;
+    }
+    split[numthreads] = N_elements; //the final split point simply must point to the end 
+    split[0] = 1; //first should point to 1 (because we're looping over sub-diagonal)
+    
+    return split;
+}
+
+ParticleSet aggregate_tracers(ParticleSet &tracers, double link_length, double timestep, std::vector<std::thread> &fof_threads, Histogram & hist)
 {
     Eigen::Array3d x1, x2, v1, v2, delta_x, delta_v;
     int N_tracers = tracers.size, p_idx; 
@@ -607,24 +381,16 @@ ParticleSet aggregate_tracers(ParticleSet &tracers, double link_length, double t
     }
 
     //split the tracer indices into groups for each thread
-    int split[4];
-    int r = N_tracers % 3;
-    split[0] = 0;
-    for(int i=1;i<=3;i++)
-        split[i] = split[i-1] + int(N_tracers/3) + int(i<=r); 
-    split[0] = 1;
- 
-    fof_args.at(0).init(&tracers, &match_dict, timestep, split[0], split[1]);
-    fof_args.at(1).init(&tracers, &match_dict, timestep, split[1], split[2]);
-    fof_args.at(2).init(&tracers, &match_dict, timestep, split[2], split[3]);
+    std::vector<int> split = thread_split(num_agg_threads, N_tracers); 
 
-    signal(fof_thr1, 5);
-    signal(fof_thr2, 6);
-    signal(fof_thr3, 7);
-  
-    wait(fof_thr1, 5);
-    wait(fof_thr2, 6);
-    wait(fof_thr3, 7);
+    for(int j=0; j<num_agg_threads; j++)
+        fof_args.at(j).init(&tracers, &match_dict, timestep, split[j], split[j+1]);
+       
+    for(int j=0; j<num_agg_threads; j++)
+        signal(fof_threads.at(j), num_calc_threads+j);
+    
+    for(int j=0; j<num_agg_threads; j++)
+        wait(fof_threads.at(j), num_calc_threads+j);
 
     //now reduce the data structure of groups to the individual groups
     for( auto &[calling_idx, m_list] :  match_dict)
@@ -655,6 +421,7 @@ ParticleSet aggregate_tracers(ParticleSet &tracers, double link_length, double t
     pos = Tensor_3D<double>(1,match_dict.size(),3);
     vel = Tensor_3D<double>(1,match_dict.size(),3);
     int cnt = 0;
+    hist.reset();
     for(auto &[p_idx, group_list] : match_dict)
     {
         x=0;
@@ -692,13 +459,25 @@ ParticleSet aggregate_tracers(ParticleSet &tracers, double link_length, double t
         vel(cnt,2) = vz/mutot;
         mu.push_back(mutot);
         cnt++;
+        if(group_list.size()>0){
+            hist.add(group_list.size()+1);
+        }
+        else{
+            hist.add(1);
+        }
     }
+
+    if(hist.total_count != N_tracers){
+        std::cout<<"Uh-oh, number of particles in match_dict groups: "<<hist.total_count<<", ";
+        std::cout<<"doesn't match the initial number of particles before this merge step: "<<N_tracers<<std::endl;
+    }
+
     return ParticleSet(mu, pos, vel);
 }
 
 double impact_parameter(double &mu1, double &mu2, Eigen::Array3d & vrel, Eigen::Array3d &v1, Eigen::Array3d &v2)
 {
-    return b *  std::sqrt( std::pow(mu1+mu2,3) / (mu1*mu2 * vrel.square().sum() * M_PI*M_SQRT2) ); 
+    return b * std::sqrt( std::pow(mu1+mu2,3) / (mu1*mu2 * vrel.square().sum() * M_PI*M_SQRT2) ); 
 }
 
 void fof(int thrd_idx, fof_arg *args_addr)
@@ -708,8 +487,7 @@ void fof(int thrd_idx, fof_arg *args_addr)
     double dotxv, dmin, t_crit;
     Tensor_3D<double> pos, vel;
     std::map<int,std::list<std::pair<int,std::array<double,7>>>> temp_match_dict;
-    
-    
+     
     while(true)
     {
         //acquire lock and wait for data

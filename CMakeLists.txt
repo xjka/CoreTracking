@@ -67,7 +67,7 @@ set(common_INCLUDE $<INSTALL_INTERFACE:include>
   ${CMAKE_CURRENT_SOURCE_DIR}/.. ${EIGEN3_INCLUDE_DIR}
   ${HDF5_INCLUDE_DIRS})
 
-add_executable(leap_frog ${SOURCE_DIR}/leap_frog.cpp)
+add_executable(leap_frog ${SOURCE_DIR}/leap_frog.cpp ${SOURCE_DIR}/utilities.cpp)
 
 foreach(program ${bin_PROGRAMS})
     target_link_libraries(${program} ${common_LINKLIB})
